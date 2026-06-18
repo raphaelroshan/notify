@@ -427,14 +427,28 @@ impl EventLoop {
                 .follow_links(self.follow_symlinks)
                 .into_iter()
             {
-                let entry = entry.map_err(map_walkdir_error)?;
                 // WalkDir yields the root first; only it is the user-requested watch.
-                self.add_single_watch(
-                    root.child(entry.into_path()),
-                    is_recursive,
-                    is_user_watch && first,
-                )?;
+                let is_root = first;
                 first = false;
+
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    // Descendants of a large recursive tree (e.g. `/`) routinely vanish
+                    // mid-walk or sit behind directories we cannot traverse. Skipping them
+                    // keeps the rest of the tree watched instead of aborting the watch.
+                    Err(err) if !is_root && walkdir_error_is_recoverable(&err) => continue,
+                    Err(err) => return Err(map_walkdir_error(err)),
+                };
+
+                let result =
+                    self.add_single_watch(root.child(entry.into_path()), is_recursive, is_root);
+                if let Err(err) = result {
+                    // Restricted entries (e.g. setuid binaries) or ones removed since the
+                    // walk observed them must not fail the whole recursive watch.
+                    if is_root || !error_is_recoverable(&err) {
+                        return Err(err);
+                    }
+                }
             }
         }
 
@@ -546,9 +560,25 @@ fn walkdir_error_is_not_found(e: &walkdir::Error) -> bool {
         .is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
+fn walkdir_error_is_recoverable(e: &walkdir::Error) -> bool {
+    e.io_error().is_some_and(io_error_is_recoverable)
+}
+
 fn error_is_not_found(e: &Error) -> bool {
     matches!(&e.kind, ErrorKind::PathNotFound)
         || matches!(&e.kind, ErrorKind::Io(io_err) if io_err.kind() == std::io::ErrorKind::NotFound)
+}
+
+fn error_is_recoverable(e: &Error) -> bool {
+    matches!(&e.kind, ErrorKind::PathNotFound)
+        || matches!(&e.kind, ErrorKind::Io(io_err) if io_error_is_recoverable(io_err))
+}
+
+fn io_error_is_recoverable(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
+    )
 }
 
 impl KqueueWatcher {
@@ -649,6 +679,35 @@ mod tests {
 
     fn watcher() -> (TestWatcher<KqueueWatcher>, test::Receiver) {
         channel()
+    }
+
+    // Regression test for https://github.com/notify-rs/notify/issues/703:
+    // a single inaccessible entry must not abort a recursive watch.
+    #[test]
+    fn recursive_watch_skips_inaccessible_descendant(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir()?;
+        let accessible = dir.path().join("accessible");
+        let restricted = dir.path().join("restricted");
+        std::fs::create_dir(&accessible)?;
+        std::fs::create_dir(&restricted)?;
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o000))?;
+
+        let kqueue = kqueue::Watcher::new()?;
+        let mut event_loop = EventLoop::new(kqueue, Box::new(|_| {}), false, EventKindMask::ALL)?;
+
+        let result = event_loop.add_watch(WatchPath::new(dir.path())?, true, true);
+
+        // Restore permissions before any assertion so the tempdir can be cleaned up.
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o755))?;
+
+        assert!(result.is_ok(), "recursive watch aborted: {result:?}");
+        assert!(event_loop.watches.contains_key(dir.path()));
+        assert!(event_loop.watches.contains_key(&accessible));
+
+        Ok(())
     }
 
     #[test]

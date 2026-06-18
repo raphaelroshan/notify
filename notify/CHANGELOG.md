@@ -8,9 +8,11 @@
 - FEATURE: [windows] report created file/folder kinds when they can be determined [#935]
 - CHANGE: [macOS] improve FSEvents callback performance by avoiding unnecessary allocations and repeated handler locking
 - PERF: [kqueue] avoid filesystem walks for recursive kqueue unwatch
+- FIX: [kqueue] don't abort a recursive watch when individual descendant entries are inaccessible (e.g. setuid binaries or files removed mid-walk) [#703]
 
 [#930]: https://github.com/notify-rs/notify/pull/930
 [#935]: https://github.com/notify-rs/notify/issues/935
+[#703]: https://github.com/notify-rs/notify/issues/703
 
 ## notify 9.0.0-rc.4 (2026-05-02)
 
