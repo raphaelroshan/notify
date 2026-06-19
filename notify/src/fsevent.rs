@@ -601,10 +601,23 @@ impl FsEventWatcher {
                         .send(Ok(CFRunLoopSendWrapper(cur_runloop)))
                         .expect("Unable to send runloop to watcher");
 
-                    // Avoid polling the runloop: block indefinitely until `CFRunLoopStop` is
-                    // called (or until the runloop is otherwise finished).
-                    if !stop_flag_thread.load(Ordering::Acquire) {
-                        cf::CFRunLoop::run();
+                    // Loop over `run_in_mode` rather than calling `CFRunLoopRun()` once:
+                    // the latter can return early with `Finished` when the system
+                    // transiently removes the FSEvents source, leaving the thread dead
+                    // and dropping all later events (notify-rs/notify#937). The bounded
+                    // timeout also lets us poll `stop_flag` for responsive shutdown.
+                    let mode = cf::kCFRunLoopDefaultMode
+                        .expect("Failed to get default runloop mode");
+                    while !stop_flag_thread.load(Ordering::Acquire) {
+                        let result = cf::CFRunLoop::run_in_mode(Some(mode), 1.0, false);
+                        if result == cf::CFRunLoopRunResult::Stopped {
+                            break;
+                        }
+                        if result == cf::CFRunLoopRunResult::Finished {
+                            // Yield so the FSEvents source can be re-scheduled before re-entering.
+                            log::trace!("CFRunLoop returned Finished; re-entering after short yield");
+                            thread::yield_now();
+                        }
                     }
                     fs::FSEventStreamStop(stream);
                     fs::FSEventStreamInvalidate(stream);

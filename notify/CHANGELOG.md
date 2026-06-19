@@ -8,9 +8,11 @@
 - FEATURE: [windows] report created file/folder kinds when they can be determined [#935]
 - CHANGE: [macOS] improve FSEvents callback performance by avoiding unnecessary allocations and repeated handler locking
 - PERF: [kqueue] avoid filesystem walks for recursive kqueue unwatch
+- FIX: [macOS] keep the FSEvents run loop alive by looping over `CFRunLoopRunInMode`, preventing the event thread from exiting early and silently dropping all later events [#937]
 
 [#930]: https://github.com/notify-rs/notify/pull/930
 [#935]: https://github.com/notify-rs/notify/issues/935
+[#937]: https://github.com/notify-rs/notify/issues/937
 
 ## notify 9.0.0-rc.4 (2026-05-02)
 
